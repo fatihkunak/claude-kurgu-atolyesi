@@ -69,7 +69,7 @@
     "studio": "node studio/server.mjs",
     "master": "npm run render:gfx && npm run composite && npm run qc && npm run audio && npm run qc:mix",
     "shorts": "node scripts/90-shorts.mjs",
-    "test:studio": "node --test --test-concurrency=1 --test-timeout=1800000 studio/tests/studio.test.mjs",
+    "test:studio": "node scripts/vendor-fonts.mjs && node --test --test-concurrency=1 --test-timeout=1800000 studio/tests/studio.test.mjs",
     "docs:screenshots": "node scripts/docs-screenshots.mjs",
     "test:unit": "node --test tests/unit.test.mjs tests/scripts.test.mjs tests/timeline.test.mjs tests/montage.test.mjs tests/assemble.test.mjs tests/privacy.test.mjs",
     "thumbnail": "node scripts/95-thumbnail.mjs",

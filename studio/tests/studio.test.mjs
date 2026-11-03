@@ -65,8 +65,8 @@ before(async () => {
   rmSync(W, { recursive: true, force: true });
   for (const d of ["public/assets", "public/fonts", "public/marka", "out", "work/transcript", "work/audio/build", "work/logs"]) mkdirSync(w(d), { recursive: true });
   for (const d of ["scripts", "src", "library", "marka", "public/fonts", "public/marka"]) cpSync(path.join(ROOT, d), w(d), { recursive: true });
-  mkdirSync(w("studio"), { recursive: true });
-  for (const f of ["server.mjs", "app.jsx", "index.html", "fonts.css", "youtube.mjs"]) cpSync(path.join(ROOT, "studio", f), w("studio", f));
+  // tüm panel kaynağı (server.mjs montage.mjs/privacy.mjs/timeline/ ... içe aktarır); testler ve masaüstü (Tauri) hariç
+  cpSync(path.join(ROOT, "studio"), w("studio"), { recursive: true, filter: (src) => !/[\\/]studio[\\/](tests|desktop)([\\/]|$)/.test(src) });
   for (const f of ["package.json", "tsconfig.json", "remotion.config.ts"]) cpSync(path.join(ROOT, f), w(f));
   writeFileSync(w("package.json"), readFileSync(path.join(ROOT, "package.json")));
   if (VIDEO) cpSync(VIDEO, w("public/main.mov"));
