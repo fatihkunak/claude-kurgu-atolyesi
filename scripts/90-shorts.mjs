@@ -10,12 +10,14 @@ import { bundle } from "@remotion/bundler";
 import { renderMedia, selectComposition } from "@remotion/renderer";
 import { enableTailwind } from "@remotion/tailwind-v4";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { p, LUT_PREVIEW } from "./lib/paths.mjs";
+import { correctedWords } from "./lib/caption-words.mjs";
+import { cropXExpr, trackFaces } from "./lib/face-track.mjs";
+import { p, LUT_PREVIEW, SOURCE } from "./lib/paths.mjs";
 
 const cfg = JSON.parse(readFileSync(p(process.argv[2]), "utf8"));
-const FPS = cfg.fps, W = 1080, H = 1920, PW = 1080, PH = 608, PTOP = 656;
+const FPS = cfg.fps, W = 1080, H = 1920;
 const outDir = p("out/shorts"), tmpDir = p("work/shorts");
 mkdirSync(outDir, { recursive: true }); mkdirSync(tmpDir, { recursive: true });
 const esc = (f) => f.replace(/\\/g, "/").replace(/([:'])/g, "\\$1");
@@ -26,9 +28,23 @@ let t = 0;
 const segs = cfg.segments.map((s) => { const o = { ...s, start: t }; t += s.dur; return o; });
 const TOTAL = +t.toFixed(3);
 
+// ── layout: portrait = 3:4 crop of the SOURCE that follows the face (1080×1440, title band above); letterbox = 16:9 master over its blur ──
+let LAYOUT = cfg.layout === "portrait" ? "portrait" : "letterbox", CW = 0, track = null;
+if (LAYOUT === "portrait") {
+  const pieces = segs.flatMap((s) => s.v ?? [{ from: s.a, dur: s.dur }]);
+  const probe = JSON.parse(execFileSync("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", SOURCE], { encoding: "utf8" })).streams[0];
+  CW = Math.floor((probe.height * 3) / 4 / 2) * 2;
+  track = await trackFaces({ source: SOURCE, from: Math.min(...pieces.map((v) => v.from)), to: Math.max(...pieces.map((v) => v.from + v.dur)) });
+  if (track) CW = CW / probe.width; else { console.log("yüz izleme yok (venv kurulu değil ya da yüz bulunamadı) → letterbox düzeni"); LAYOUT = "letterbox"; }
+}
+const PW = 1080, PH = LAYOUT === "portrait" ? 1440 : 608, PTOP = LAYOUT === "portrait" ? 300 : 656;
+
 // ── captions from word timings (whisper -ml 1 JSON of the master's narration) ─────────────────
-const words = JSON.parse(readFileSync(p(cfg.words), "utf8")).transcription
+const rawWords = JSON.parse(readFileSync(p(cfg.words), "utf8")).transcription
   .map((w) => ({ t: w.offsets.from / 1000, text: w.text.trim() })).filter((w) => w.text);
+// the user's transcript corrections reach the captions: corrected text, raw word times
+const reviewed = existsSync(p("work/transcript.tr.json")) ? JSON.parse(readFileSync(p("work/transcript.tr.json"), "utf8")).segments : null;
+const words = correctedWords(rawWords, reviewed);
 const captions = [];
 for (const s of segs) {
   const ws = words.filter((w) => w.t >= s.a - 0.05 && w.t < s.a + s.dur - 0.1);
@@ -45,7 +61,7 @@ const shownCaptions = captions.filter((c) => c.from < ctaAt);
 
 // ── 1. overlay (Remotion) ────────────────────────────────────────────────────────────────────
 const overlayFile = path.join(tmpDir, `${cfg.name}.overlay.mov`);
-const inputProps = { ...cfg.overlay, captions: shownCaptions, durationSeconds: TOTAL, fps: FPS };
+const inputProps = { ...cfg.overlay, captions: shownCaptions, layout: LAYOUT, durationSeconds: TOTAL, fps: FPS };
 writeFileSync(path.join(tmpDir, `${cfg.name}.props.json`), JSON.stringify(inputProps, null, 2));
 const serveUrl = await bundle({ entryPoint: p("src/index.ts"), webpackOverride: enableTailwind, publicDir: p("public") });
 const composition = await selectComposition({ serveUrl, id: "Short", inputProps });
@@ -54,15 +70,16 @@ await renderMedia({ composition, serveUrl, inputProps, outputLocation: overlayFi
 console.log(`overlay → ${path.relative(p(), overlayFile)} (${TOTAL} sn, ${shownCaptions.length} altyazı)`);
 
 // ── 2. picture + sound (FFmpeg) ─────────────────────────────────────────────────────────────
-const toSdr = cfg.video.hlg
+const toSdrBase = cfg.video.hlg
   ? `scale=1920:1080:flags=bicubic,scale=in_color_matrix=bt2020:in_range=tv:out_range=pc:${SWS},format=gbrp16le,lut3d=file='${esc(LUT_PREVIEW)}':interp=tetrahedral,scale=out_color_matrix=bt709:out_range=tv:${SWS}`
   : `scale=1920:1080:in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=tv:${SWS}`;
+const toSdr = LAYOUT === "portrait" ? toSdrBase.replace("scale=1920:1080", "scale=1080:1440") : toSdrBase;
 const inputs = [], lines = [];
 let n = 0;
 const vLabels = [];
 for (const s of segs) for (const v of s.v ?? [{ from: s.a, dur: s.dur }]) {
-  inputs.push("-ss", v.from.toFixed(3), "-t", (v.dur + 0.2).toFixed(3), "-i", p(cfg.video.file));
-  lines.push(`[${n}:v]${toSdr},fps=${FPS},trim=end_frame=${Math.round(v.dur * FPS)},setpts=PTS-STARTPTS,format=yuv420p,setsar=1[v${n}]`);
+  inputs.push("-ss", v.from.toFixed(3), "-t", (v.dur + 0.2).toFixed(3), "-i", LAYOUT === "portrait" ? SOURCE : p(cfg.video.file));
+  lines.push(`[${n}:v]${LAYOUT === "portrait" ? `crop=w=trunc(ih*3/4/2)*2:h=ih:x='${cropXExpr(track, v.from, CW)}':y=0,` : ""}${toSdr},fps=${FPS},trim=end_frame=${Math.round(v.dur * FPS)},setpts=PTS-STARTPTS,format=yuv420p,setsar=1[v${n}]`);
   vLabels.push(`[v${n}]`); n++;
 }
 const aLabels = [];

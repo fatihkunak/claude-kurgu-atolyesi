@@ -5,6 +5,7 @@ import rawPlan from "../work/edit-plan.json";
 import { planSchema } from "./plan/schema";
 import { GraphicsLayer, GraphicsLayerProps } from "./compositions/GraphicsLayer";
 import { ShortOverlay, ShortProps } from "./compositions/ShortOverlay";
+import { Thumbnail, ThumbnailProps } from "./compositions/Thumbnail";
 
 // The editorial plan is data (work/edit-plan.json); it is validated once here.
 const plan = planSchema.parse(rawPlan);
@@ -35,6 +36,8 @@ export const RemotionRoot: React.FC = () => {
     <>
       {/* Vertical Shorts overlay (scripts/90-shorts.mjs) */}
       <Composition id="Short" component={ShortOverlay} width={1080} height={1920} fps={30} durationInFrames={1} defaultProps={shortDefaults} calculateMetadata={shortMetadata} />
+      {/* YouTube thumbnail still (scripts/95-thumbnail.mjs) */}
+      <Composition id="Thumbnail" component={Thumbnail} width={1280} height={720} fps={30} durationInFrames={1} defaultProps={{ title: "", accent: "", frame: "derived/kapak-frame.jpg", locale: "tr" } satisfies ThumbnailProps} />
       {/* Layout/content review over the tone-mapped SDR proxy. Not a colour reference. */}
       <Composition id="Preview" component={GraphicsLayer} width={1920} height={1080} fps={60} durationInFrames={1} defaultProps={{ plan, showProxy: true }} calculateMetadata={calculateMetadata} />
       {/* Transparent graphics only — this is what scripts/60-render-segments.mjs renders at scale 2. */}

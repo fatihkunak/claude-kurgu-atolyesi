@@ -33,7 +33,7 @@ const W = 3840, H = 2160, SR = 44100;
 const SDR_OUT = spec.output === "sdr";
 if (SDR_OUT && spec.pieces.some((pc) => pc.kind !== "sdr")) throw new Error("output: sdr yalnızca sdr parçalarla çalışır (HLG kaynağı SDR'a indirilmez).");
 const TAGS = SDR_OUT ? "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv" : "setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc:range=tv";
-const probe = (f) => JSON.parse(execFileSync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,r_frame_rate", "-of", "json", f], { encoding: "utf8" })).streams;
+const probe = (f) => JSON.parse(execFileSync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,r_frame_rate,width,height", "-of", "json", f], { encoding: "utf8" })).streams;
 const [num, den] = probe(p(spec.pieces[0].src)).find((s) => s.codec_type === "video").r_frame_rate.split("/").map(Number);
 const FPS = num / den;
 const SWS = "flags=accurate_rnd+full_chroma_int";
@@ -54,8 +54,7 @@ spec.pieces.forEach((pc, i) => {
   const samples = Math.round((frames / FPS) * SR);
   inputs.push("-ss", pc.from.toFixed(6), "-t", ((frames + 2) / FPS).toFixed(6), "-i", p(pc.src));
   const vi = nIn++;
-  let ai = vi; // a piece with no audio stream (e.g. a muted screen recording) gets the same length of silence;
-  // otherwise "[N:a]" matches no streams and ffmpeg fails with "Error binding filtergraph inputs/outputs"
+  let ai = vi; // sessiz kaynak (ses akışı yok): aynı süre kadar sessizlik üretilir, yoksa filtre grafiği "matches no streams" ile çöker
   if (!probe(p(pc.src)).some((s) => s.codec_type === "audio")) {
     inputs.push("-f", "lavfi", "-t", ((frames + 2) / FPS).toFixed(6), "-i", `anullsrc=r=${SR}:cl=stereo`);
     ai = nIn++;
@@ -63,7 +62,12 @@ spec.pieces.forEach((pc, i) => {
   }
   const v = pc.kind === "sdr"
     ? `crop=${pc.crop ? pc.crop.join(":") : "iw-mod(iw\\,16):ih"},scale=${W}:${H}:flags=lanczos${SDR_OUT ? `:in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=tv:${SWS}` : `,${sdrToHlg}`}`
-    : stripDovi;
+    : `${stripDovi}${(() => {
+        const vs = probe(p(pc.src)).find((x) => x.codec_type === "video");
+        if (vs.width === W && vs.height === H) return "";
+        if (vs.width * 9 !== vs.height * 16) throw new Error(`${path.basename(pc.src)}: ${vs.width}x${vs.height} 16:9 değil; HLG parçalar 16:9 olmalı (4K'ya ölçeklenir).`);
+        return `,scale=${W}:${H}:flags=lanczos`;
+      })()}`;
   lines.push(`[${vi}:v]${v},format=yuv422p10le,${TAGS},setsar=1,trim=end_frame=${frames},setpts=PTS-STARTPTS,fps=${num}/${den}[v${i}]`);
   const gain = pc.gainDb ? `,volume=${pc.gainDb}dB,alimiter=limit=0.794:attack=2:release=60:level=disabled` : "";
   // 12 ms fades at every splice: no click where two recordings meet
@@ -87,9 +91,8 @@ if (zooms.length) {
   const Z = `(1+${sum((z) => (z.z - 1).toFixed(4))})`;
   const CX = `(0.5+${sum((z) => (z.cx - 0.5).toFixed(4))})`;
   const CY = `(0.5+${sum((z) => (z.cy - 0.5).toFixed(4))})`;
-  // scale (eval=frame) changes the frame size per frame, but crop's iw/ih stay at the link's FIRST size (t=0 → 1×, i.e. 3840x2160):
-  // iw-W = 0, so the window stuck to the top-left corner instead of following cx/cy. crop therefore derives the size
-  // from the same t-expression scale uses.
+  // scale (eval=frame) değişen boyutlu kare üretir, ama crop'un iw/ih'ı bağlantının İLK boyutunda (t=0 → 1×) kalır:
+  // iw-W = 0 olur ve kadraj sol-üst köşeye yapışırdı. Bu yüzden crop, boyutu scale ile aynı t-ifadesinden hesaplar.
   const SW = `(2*trunc(${W}*${Z}/2))`, SH = `(2*trunc(${H}*${Z}/2))`;
   lines.push(`[cv]scale=w='${SW}':h='${SH}':eval=frame:flags=lanczos,` +
     `crop=${W}:${H}:x='clip(${SW}*${CX}-${W / 2},0,${SW}-${W})':y='clip(${SH}*${CY}-${H / 2},0,${SH}-${H})',` +

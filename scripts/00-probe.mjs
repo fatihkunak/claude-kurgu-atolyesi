@@ -1,10 +1,11 @@
 // Preflight: inspects public/main.mov and the local toolchain, writes work/source-metadata.json.
 // Read-only with respect to the source. Re-run any time: `npm run probe`.
 import { execFileSync } from "node:child_process";
-import { statSync, writeFileSync, existsSync } from "node:fs";
+import { statSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ROOT, SOURCE } from "./lib/paths.mjs";
+import { whisperCli, listDir, diskFree } from "./lib/platform.mjs";
 
 const run = (cmd, args) =>
   execFileSync(cmd, args, { encoding: "utf8", maxBuffer: 1 << 28, stdio: ["ignore", "pipe", "pipe"] });
@@ -55,6 +56,7 @@ const allDeltas = new Set(Object.values(ptsDeltas).flatMap((w) => Object.keys(w.
 
 const v = probe.streams.find((s) => s.codec_type === "video");
 const a = probe.streams.find((s) => s.codec_type === "audio");
+if (!a) { console.error("Kaynakta ses izi yok. Atölye konuşan-kafa videosu bekler; ses hattı bu dosyayla çalışmaz."); process.exit(1); }
 
 // 3. Toolchain
 const encoders = tryRun("ffmpeg", ["-hide_banner", "-encoders"]);
@@ -112,16 +114,16 @@ const meta = {
   },
   tools: {
     ffmpeg: tryRun("ffmpeg", ["-version"]).split("\n").slice(0, 3),
-    encoders: { libx265: has(encoders, "libx265"), hevc_videotoolbox: has(encoders, "hevc_videotoolbox"), prores_ks: has(encoders, "prores_ks") },
+    encoders: { libx265: has(encoders, "libx265"), hevc_videotoolbox: has(encoders, "hevc_videotoolbox"), hevc_nvenc: has(encoders, "hevc_nvenc"), prores_ks: has(encoders, "prores_ks") },
     filters: Object.fromEntries(["zscale", "libplacebo", "lut3d", "overlay", "tonemap", "colorspace", "sidedata", "ssim", "psnr", "libvmaf", "signalstats"].map((f) => [f, has(filters, f)])),
-    whisperCli: tryRun("which", ["whisper-cli"]).trim(),
-    whisperModels: tryRun("ls", ["-la", path.join(os.homedir(), "Models/whisper")]).split("\n"),
+    whisperCli: whisperCli(),
+    whisperModels: listDir(path.join(os.homedir(), "Models/whisper")),
     node: process.version,
     remotion: Object.fromEntries(["remotion", "@remotion/cli", "@remotion/renderer", "@remotion/bundler", "@remotion/google-fonts"].map((p) => [p, remotionVersion(p)])),
   },
   system: {
     cpu: os.cpus()[0]?.model, cores: os.cpus().length, memoryGiB: +(os.totalmem() / 2 ** 30).toFixed(1),
-    os: `${os.type()} ${os.release()}`, diskFree: tryRun("df", ["-h", ROOT]).split("\n")[1],
+    os: `${os.type()} ${os.release()}`, diskFree: diskFree(ROOT),
   },
   raw: { ffprobe: probe },
 };
@@ -131,6 +133,25 @@ const s = meta.summary;
 console.log(`OK  ${s.video.width}x${s.video.height} ${s.video.pixFmt} ${s.video.rFrameRate} fps, ${s.video.nbFrames} frames, ${s.durationSeconds}s`);
 console.log(`    ${s.video.colorPrimaries}/${s.video.colorTransfer}/${s.video.colorSpace}/${s.video.colorRange}  CFR=${s.video.constantFrameRate}  HLG=${s.hdr.isHlgTagged}  DV=${!!s.hdr.dolbyVision}`);
 if (!s.hdr.isHlgTagged) console.log("NOT  SDR kaynak (HLG değil) → pipeline SDR BT.709 dalını kullanır (scripts/lib/filters.mjs → sourceIsHlg).");
+// Log footage carries no tag of its own (a DJI file is bt709 either way), so look at the pixels. Low mean saturation is the
+// reliable sign: real D-Log M clips measured SATAVG 29–47 (10 bit), Normal ones 57–88. Lifted blacks alone missed them all.
+const lumaScale = s.video.effectiveBitDepth === 10 ? 4 : 1;
+const sampleTimes = [0.1, 0.3, 0.5, 0.7, 0.9].map((f) => (duration * f).toFixed(2));
+const pixelStats = sampleTimes.map((t) => tryRun("ffmpeg", ["-hide_banner", "-nostdin", "-ss", t, "-i", SOURCE, "-map", "0:v:0", "-frames:v", "1", "-vf", "signalstats,metadata=print:file=-", "-f", "null", "-"]));
+const lumaMins = pixelStats.map((out) => Number(/signalstats\.YMIN=(\d+)/.exec(out)?.[1] ?? NaN)).filter(Number.isFinite);
+const sats = pixelStats.map((out) => Number(/signalstats\.SATAVG=([\d.]+)/.exec(out)?.[1] ?? NaN)).filter(Number.isFinite);
+const satAvg = sats.length ? sats.reduce((a, b) => a + b, 0) / sats.length : NaN;
+if (!s.hdr.isHlgTagged && lumaMins.length && Math.min(...lumaMins) > 30 * lumaScale) {
+  console.log(`UYARI: siyahlar kalkık (en düşük Y=${Math.min(...lumaMins)}), görüntü LUT'suz D-Log M olabilir. Bir kareye bak, MARKA.md §7.`);
+}
+// an already graded copy (npm run lut) can stay below the line on its own: scenes differ, the warning is about ungraded log
+const alreadyGraded = existsSync(path.join(ROOT, "work/project.json")) && !!JSON.parse(readFileSync(path.join(ROOT, "work/project.json"), "utf8")).lut;
+if (!s.hdr.isHlgTagged && !alreadyGraded && satAvg < 50 * (lumaScale / 4)) {
+  console.log(`UYARI: doygunluk çok düşük (SATAVG ${satAvg.toFixed(0)}), görüntü LUT'suz D-Log M olabilir. Bir kareye bak; öyleyse npm run lut. MARKA.md §7.`);
+}
+if (s.video.width < s.video.height) {
+  console.log(`UYARI: dikey kaynak (${s.video.width}x${s.video.height}). Atölye yatay video için kuruldu; proxy 1920x1080'e sıkıştırır (scripts/10-proxy.mjs).`);
+}
 if (!stable || !s.video.constantFrameRate) {
   console.error("UYARI: kaynak beklenen koşulları sağlamıyor; devam etmeden önce work/source-metadata.json dosyasını inceleyin.");
   process.exit(2);

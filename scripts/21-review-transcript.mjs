@@ -1,10 +1,12 @@
 // Applies the reviewed corrections to the raw whisper output and writes the deliverable
 // transcript files. Fails loudly if a correction no longer matches (so nothing is silently lost).
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { p } from "./lib/paths.mjs";
 
 const raw = JSON.parse(readFileSync(p("work/transcript/raw.json"), "utf8"));
-const { corrections, uncertain } = JSON.parse(readFileSync(p("work/transcript/corrections.tr.json"), "utf8"));
+// silent clip (no speech): no corrections file is needed
+const corrFile = p("work/transcript/corrections.tr.json");
+const { corrections, uncertain } = existsSync(corrFile) ? JSON.parse(readFileSync(corrFile, "utf8")) : { corrections: [], uncertain: [] };
 const meta = JSON.parse(readFileSync(p("work/source-metadata.json"), "utf8"));
 
 let segments = raw.transcription
@@ -51,10 +53,10 @@ writeFileSync(p("work/transcript.tr.srt"), srt);
 writeFileSync(p("work/transcript.tr.json"), JSON.stringify({
   source: meta.source.path, sourceSizeBytes: meta.source.sizeBytes, sourceDurationSeconds: duration,
   language: "tr", engine: "whisper.cpp 1.9.4", model: "ggml-large-v3-turbo",
-  coverage: { firstStart: segments[0].start, lastEnd: segments.at(-1).end },
+  coverage: segments.length ? { firstStart: segments[0].start, lastEnd: segments.at(-1).end } : null,
   timestampNote: "Segment zamanları whisper tahminidir (±0,2–0,5 sn); kare hassasiyetinde doğrulanmamıştır.",
   correctionsApplied: used, uncertainPassages: uncertain, segments,
 }, null, 2));
 mkdirSync(p("out"), { recursive: true });
 writeFileSync(p("out/final.tr.srt"), srt);
-console.log(`${segments.length} segment, ${segments[0].start.toFixed(2)}s → ${segments.at(-1).end.toFixed(2)}s / ${duration}s; ${used.length} düzeltme, ${uncertain.length} belirsiz pasaj işaretli.`);
+console.log(segments.length ? `${segments.length} segment, ${segments[0].start.toFixed(2)}s → ${segments.at(-1).end.toFixed(2)}s / ${duration}s; ${used.length} düzeltme, ${uncertain.length} belirsiz pasaj işaretli.` : `Konuşma yok: boş döküm yazıldı (${duration}s klip).`);

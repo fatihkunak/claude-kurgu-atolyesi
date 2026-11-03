@@ -20,7 +20,7 @@ execFileSync("ffmpeg", [
   "-map", "0:v:0", "-map", "0:a:0",
   "-vf", viewingTransform({ width: 1920, height: 1080 }),
   "-fps_mode", "passthrough", // source is strict CFR; passthrough keeps its exact timestamps (-r would contradict it)
-  "-video_track_timescale", String(fpsNum * 10 / fpsDen),
+  "-video_track_timescale", String(fpsDen === 1 ? fpsNum * 10 : fpsNum),
   "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-g", "30", "-pix_fmt", "yuv420p",
   "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv",
   "-c:a", "aac", "-b:a", "128k", // preview-only audio; the master stream-copies the original track

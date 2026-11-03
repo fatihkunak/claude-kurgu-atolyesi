@@ -1,7 +1,7 @@
 // Sound design: builds the effects stem from the PLAN (sample-accurate, in Node), the music stem
 // (gain + fades + gentle narration-keyed ducking, in FFmpeg) and sums them with the UNTOUCHED
 // narration:  mix = narration + music stem + effects stem  (plain linear sum, no limiter).
-// The video stream is never re-encoded; audio is encoded exactly once (aac_at 256 kb/s).
+// The video stream is never re-encoded; audio is encoded exactly once (AAC 256 kb/s: aac_at on macOS, native aac elsewhere).
 //   node scripts/75-audio.mjs                    → stems + mix (work/audio/build) and the report
 //   node scripts/75-audio.mjs --preview 0-40     → audition clip over the SDR proxy (work/audio/preview)
 //   node scripts/75-audio.mjs --selection library/audio/selection.default.json   → try another selection file
@@ -13,6 +13,10 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { p, PROXY, SOURCE, sourceTiming } from "./lib/paths.mjs";
 import { loadPlan } from "./lib/plan.mjs";
 import { viewingTransform } from "./lib/filters.mjs";
+import { aacEncoder } from "./lib/platform.mjs";
+import { checkPlace, cutArgs, musicStemFilter } from "./lib/music-placement.mjs";
+
+const AAC = aacEncoder(); // aac_at on macOS, native aac elsewhere
 
 const arg = (name) => { const i = process.argv.indexOf(`--${name}`); return i > 0 ? process.argv[i + 1] : undefined; };
 // the narration's own sample rate (44.1 kHz camera audio, 48 kHz from other tools): never resample the narration
@@ -232,7 +236,16 @@ writeWav(`${BUILD}/stem-efekt.wav`, sfxStem);
 
 // ── 4. music stem: gain → fades → ducking keyed by the narration ───────────────────────────────
 let musicFile = NO_MUSIC ? null : p(selection.music);
-if (!NO_MUSIC) { // shorter than the video → repeat it with 5 s equal-power crossfades (no hard seam), never stretch it
+// Montaj'daki müzik klibi: selection.musicPlace = { start, in, out, gainDb? } → kesit ayrı dosyaya, loop yok, videonun start. saniyesine yerleşir
+const place = NO_MUSIC ? null : selection.musicPlace ?? null;
+if (place) {
+  const bad = checkPlace(place, frames / fps);
+  if (bad) throw new Error(bad);
+  ff([...cutArgs(musicFile, place), "-c:a", "pcm_f32le", `${BUILD}/music-cut.wav`]);
+  musicFile = `${BUILD}/music-cut.wav`;
+  console.log(`müzik  kesit ${place.in}–${place.out} sn → videonun ${place.start}. saniyesine${place.gainDb ? `, ${place.gainDb > 0 ? "+" : ""}${place.gainDb} dB` : ""}`);
+}
+if (!NO_MUSIC && !place) { // shorter than the video → repeat it with 5 s equal-power crossfades (no hard seam), never stretch it
   const len = probeDur(musicFile), need = frames / fps, X = 5;
   if (len < need - 1) {
     const n = Math.ceil((need - X) / (len - X));
@@ -249,7 +262,7 @@ if (NO_MUSIC) writeWav(`${BUILD}/stem-muzik.wav`, new Float32Array(TOTAL * CH));
 else {
 const duck = levels.duck ? `[m][1:a]sidechaincompress=threshold=0.0316:ratio=${levels.duckRatio ?? 1.6}:attack=15:release=350:detection=rms:makeup=1[out]` : "[m]anull[out]";
 ff(["-i", musicFile, "-i", `${BUILD}/narration.wav`, "-filter_complex",
-  `[0:a]aresample=${SR}:filter_size=64:cutoff=0.97,aformat=sample_fmts=flt:channel_layouts=stereo,atrim=0:${dur},volume=${musicGainDb.toFixed(2)}dB,afade=t=in:st=0:d=${levels.fadeIn},afade=t=out:st=${(dur - levels.fadeOut).toFixed(3)}:d=${levels.fadeOut},apad=whole_len=${TOTAL}[m];${duck}`,
+  `${musicStemFilter({ SR, dur, TOTAL, gainDb: musicGainDb, fadeIn: levels.fadeIn, fadeOut: levels.fadeOut, place, segLen: place ? probeDur(musicFile) : 0 })};${duck}`,
   "-map", "[out]", "-c:a", "pcm_f32le", `${BUILD}/stem-muzik.wav`]);
 }
 const musicStem = decode(`${BUILD}/stem-muzik.wav`).subarray(0, TOTAL * CH);
@@ -285,7 +298,7 @@ if (preview) {
   const master = [p("out/final-en.temiz-ses.mov"), p("out/final-hlg.temiz-ses.mov")].find((f) => existsSync(f)) ?? "";
   const [video, vf] = existsSync(master) ? [master, viewingTransform({ width: 1280, height: 720 })] : [PROXY, "scale=1280:-2"];
   ff(["-ss", String(a), "-t", String(b - a), "-i", video, "-ss", String(a), "-t", String(b - a), "-i", `${BUILD}/mix.wav`, "-map", "0:v:0", "-map", "1:a:0",
-    "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p", "-c:a", "aac_at", "-b:a", "256k", "-movflags", "+faststart", out]);
+    "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p", "-c:a", AAC, "-b:a", "256k", "-movflags", "+faststart", out]);
   console.log(`önizleme → ${out} (yalnızca ses dengesi/eşzamanlılık için; renk referansı değildir)`);
 }
 if (process.argv.includes("--mux")) {
@@ -293,7 +306,7 @@ if (process.argv.includes("--mux")) {
   const candidate = [p("out/final-en.temiz-ses.mov"), p("out/final-hlg.temiz-ses.mov"), p("work/composite/final-hlg.candidate.mov")].find((f) => existsSync(f));
   if (!candidate) throw new Error("Video master'ı yok — önce `npm run composite` (ve `npm run qc`).");
   const out = p("work/composite/final-hlg.mix.candidate.mov");
-  ff(["-i", candidate, "-i", `${BUILD}/mix.wav`, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac_at", "-b:a", "256k", "-ar", String(SR),
+  ff(["-i", candidate, "-i", `${BUILD}/mix.wav`, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", AAC, "-b:a", "256k", "-ar", String(SR),
     "-map_metadata", "-1", "-tag:v", "hvc1", "-movflags", "+faststart+write_colr", "-f", "mov", out]);
   mkdirSync(p("out/stems"), { recursive: true });
   ff(["-i", `${BUILD}/stem-muzik.wav`, "-c:a", "pcm_s24le", p("out/stems/muzik.wav")]);

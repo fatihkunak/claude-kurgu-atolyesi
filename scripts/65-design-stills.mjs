@@ -7,9 +7,9 @@
 import { bundle } from "@remotion/bundler";
 import { renderStill, selectComposition } from "@remotion/renderer";
 import { enableTailwind } from "@remotion/tailwind-v4";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { p } from "./lib/paths.mjs";
+import { tileSheet } from "./lib/platform.mjs";
 import { loadPlan } from "./lib/plan.mjs";
 
 const i = process.argv.indexOf("--only");
@@ -40,5 +40,5 @@ for (const e of events) {
   await renderStill({ composition, serveUrl, inputProps, frame, scale: 0.5, imageFormat: "jpeg", jpegQuality: 88, output: `${dir}/hold_${String(++n).padStart(2, "0")}_${e.id}.jpg`, chromiumOptions: { gl: "angle" }, logLevel: "error" });
   console.log(`${e.id}  kare ${frame}`);
 }
-execFileSync("ffmpeg", ["-v", "error", "-y", "-framerate", "1", "-pattern_type", "glob", "-i", `${dir}/hold_*.jpg`, "-vf", "tile=2x2:padding=6:color=black", "-q:v", "3", `${dir}/sheet_%02d.jpg`]);
+tileSheet(dir, /^hold_.*\.jpg$/, "tile=2x2:padding=6:color=black", 3);
 console.log(`Kontak sayfaları: ${dir}/sheet_*.jpg`);

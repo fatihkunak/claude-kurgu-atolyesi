@@ -12,6 +12,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { p, SOURCE, ORIGINAL, FINAL } from "./lib/paths.mjs";
+import { tileSheet } from "./lib/platform.mjs";
 import { loadPlan } from "./lib/plan.mjs";
 import { viewingTransform, sourceIsHlg } from "./lib/filters.mjs";
 
@@ -96,6 +97,28 @@ check("audio-timing", oa.start_time === sa.start_time && Math.abs(Number(oa.dura
   `ses ${oa.start_time}+${oa.duration}, video ${ov.start_time} / kaynak ses ${sa.start_time}+${sa.duration}`);
 }
 
+// `-ss t` alone on two different containers can land them one frame apart (B-frame priming, edit lists): a window then
+// compares neighbouring frames and reads ~30 dB on a clean picture. Seek LEAD s early on BOTH inputs and cut the exact
+// window with trim, so source and output yield the same frames.
+const LEAD = 0.5;
+const seekArgs = (t, f) => ["-ss", String(Math.max(0, t - LEAD)), "-i", f];
+const cut = (t, d) => `trim=start=${(t - Math.max(0, t - LEAD)).toFixed(3)}:duration=${d},setpts=PTS-STARTPTS`;
+// ---- 2b. graphics present: at the middle of up to 6 plan events the output must differ clearly from the source ----
+// (a composite whose overlay silently ended passed every other check; this catches it at the picture level)
+{
+  const evs = [...plan.events].sort((a, b) => a.start - b.start);
+  const pick = evs.length <= 6 ? evs : Array.from({ length: 6 }, (_, k) => evs[Math.round((k * (evs.length - 1)) / 5)]);
+  const TAGG = sourceIsHlg() ? "" : "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv,";
+  const res = pick.map((e) => {
+    const t = (e.start + e.end) / 2;
+    const log = sh("ffmpeg", ["-hide_banner", "-v", "error", ...seekArgs(t, SOURCE), ...seekArgs(t, file),
+      "-filter_complex", `[0:v]${cut(t, 0.2)},${TAGG}format=yuv420p10le[a];[1:v]${cut(t, 0.2)},${TAGG}format=yuv420p10le[b];[a][b]blend=all_mode=difference:shortest=1,signalstats,metadata=print:file=-`, "-f", "null", "-"]);
+    const v = [...log.matchAll(/YMAX=([0-9.]+)/g)].map((x) => Number(x[1]));
+    return { id: e.id, ymax: v.length ? Math.max(...v) : 0 };
+  });
+  const seen = res.filter((r) => r.ymax >= 300).length;
+  check("graphics-present", seen >= Math.ceil(res.length * 0.75), `${seen}/${res.length} olayda kaynak↔çıktı farkı var (${res.map((r) => `${r.id}:${r.ymax}`).join(" ")})`);
+}
 // ---- 3. untouched picture: regions/times without overlays, source vs output ------------------
 const active = (t) => plan.events.some((e) => t >= e.start - 0.1 && t <= e.end + 0.1);
 // 1-second windows in the graphics-free gaps of THIS plan (≥ 3,4 s free, one window every ~9 s of gap), thinned to 15
@@ -105,30 +128,46 @@ const gapWindows = [];
   let cursor = 0;
   for (const e of [...evs, { start: plan.source.durationSeconds, end: plan.source.durationSeconds }]) {
     const free = e.start - cursor;
-    if (free >= 3.4) { const n = Math.max(1, Math.floor(free / 9)); for (let k = 1; k <= n; k++) gapWindows.push(Math.floor(cursor + (free * k) / (n + 1) - 0.5)); }
+    if (free >= 3.4) { const n = Math.max(1, Math.floor(free / 9)); for (let k = 1; k <= n; k++) gapWindows.push({ t: Math.floor(cursor + (free * k) / (n + 1) - 0.5), d: 1 }); }
+    // short clips can have only small gaps: measure those too, staying out of the ±0,1 s the graphics may still occupy
+    else if (free >= 0.35) gapWindows.push({ t: +(cursor + (cursor ? 0.12 : 0)).toFixed(3), d: +(free - (cursor ? 0.24 : 0.12)).toFixed(3) });
     cursor = Math.max(cursor, e.end);
   }
 }
 const step = Math.max(1, gapWindows.length / 15);
-const probes = Array.from({ length: Math.min(15, gapWindows.length) }, (_, i) => gapWindows[Math.floor(i * step)]).filter((t) => t >= 1 && !active(t) && !active(t + 1));
+const probes = Array.from({ length: Math.min(15, gapWindows.length) }, (_, i) => gapWindows[Math.floor(i * step)]).filter(({ t, d }) => (d < 1 || t >= 1) && !active(t) && !active(t + d));
 const metrics = [];
 // untagged SDR sources would be auto-converted BT.601→BT.709 against the tagged output: tag both the same way
+// per-video grade (work/project.json → "grade") is an intended change: the SOURCE reference goes through the same chain
+const GRADE = JSON.parse(readFileSync(p("work/project.json"), "utf8")).grade;
+const GR = GRADE ? `${GRADE},` : "";
 const TAG = sourceIsHlg() ? "" : "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv,";
-for (const t of probes) {
-  const log = sh("ffmpeg", ["-hide_banner", "-v", "info", "-ss", String(t), "-t", "1", "-i", SOURCE, "-ss", String(t), "-t", "1", "-i", file,
-    "-filter_complex", `[0:v]${TAG}format=yuv420p10le[a];[1:v]${TAG}format=yuv420p10le[b];[a][b]psnr[o]`, "-map", "[o]", "-f", "null", "-"]);
+// privacy blur (project.json → "privacy": true) is an intended change too: the SOURCE reference goes through the same pixelate+feathered-mask
+// chain as scripts/70-composite.mjs, so the check still proves that everything OUTSIDE the blurred regions is untouched
+const PRIVACY = JSON.parse(readFileSync(p("work/project.json"), "utf8")).privacy === true;
+const MASK = p("work/privacy/mask.mkv");
+const { width: SW, height: SH } = JSON.parse(readFileSync(p("work/source-metadata.json"), "utf8")).summary.video;
+const tagAfter = TAG ? `,${TAG.slice(0, -1)}` : "";
+const refChain = (t, d) => (PRIVACY
+  ? `[0:v]${cut(t, d)},${TAG}${GR}format=yuv420p10le,split[pa][pb];[pb]scale=${SW / 32}:${SH / 32}:flags=area,scale=${SW}:${SH}:flags=bicubic[pbl];[2:v]${cut(t, d)},scale=${SW}:${SH}:flags=bilinear,gblur=sigma=8,format=gray[pmk];[pbl][pmk]alphamerge[pbla];[pa][pbla]overlay=format=yuv420p10${tagAfter}[a]`
+  : `[0:v]${cut(t, d)},${TAG}${GR}format=yuv420p10le[a]`);
+for (const { t, d } of probes) {
+  const log = sh("ffmpeg", ["-hide_banner", "-v", "info", ...seekArgs(t, SOURCE), ...seekArgs(t, file), ...(PRIVACY ? seekArgs(t, MASK) : []),
+    "-filter_complex", `${refChain(t, d)};[1:v]${cut(t, d)},${TAG}format=yuv420p10le[b];[a][b]psnr=shortest=1[o]`, "-map", "[o]", "-f", "null", "-"]);
   const m = log.match(/PSNR y:([\d.inf]+) u:([\d.inf]+) v:([\d.inf]+) average:([\d.inf]+) min:([\d.inf]+)/);
   // averaged over the same 1 s window as the PSNR (a single-frame seek can land one frame apart on some sources)
-  const stat = (f) => { const s = sh("ffmpeg", ["-hide_banner", "-v", "error", "-ss", String(t), "-t", "1", "-i", f, "-vf", "format=yuv420p10le,signalstats,metadata=print:file=-", "-f", "null", "-"]);
+  const stat = (f) => { const s = sh("ffmpeg", ["-hide_banner", "-v", "error", ...seekArgs(t, f), "-vf", `${cut(t, d)},${f === SOURCE ? GR : ""}format=yuv420p10le,signalstats,metadata=print:file=-`, "-f", "null", "-"]);
     const g = (k) => { const v = [...s.matchAll(new RegExp(`${k}=([\\d.]+)`, "g"))].map((x) => Number(x[1])); return v.length ? +(v.reduce((a, b) => a + b, 0) / v.length).toFixed(3) : NaN; };
     return { YMIN: g("YMIN"), YLOW: g("YLOW"), YAVG: g("YAVG"), YHIGH: g("YHIGH"), YMAX: g("YMAX"), UAVG: g("UAVG"), VAVG: g("VAVG") }; };
   const a = stat(SOURCE), b = stat(file);
   metrics.push({ t, psnr: m ? { y: +m[1], u: +m[2], v: +m[3], min: +m[5] } : null, source: a, output: b,
     dYavg: +(b.YAVG - a.YAVG).toFixed(3), dUavg: +(b.UAVG - a.UAVG).toFixed(3), dVavg: +(b.VAVG - a.VAVG).toFixed(3), dYlow: b.YLOW - a.YLOW, dYhigh: b.YHIGH - a.YHIGH, dYmax: b.YMAX - a.YMAX });
 }
+// no window means nothing was compared: say so instead of passing silently
+if (!metrics.length) console.log("ATLANDI  grafiksiz pencere yok: untouched-picture-psnr, no-level-or-colour-shift, no-contrast-or-highlight-change ölçülmedi.");
 const worstPsnr = Math.min(...metrics.map((m) => m.psnr?.y ?? 0));
 const worstShift = Math.max(...metrics.flatMap((m) => [Math.abs(m.dYavg), Math.abs(m.dUavg), Math.abs(m.dVavg)]));
-check("untouched-picture-psnr", worstPsnr >= 40, `${metrics.length} pencere, en düşük Y-PSNR ${worstPsnr.toFixed(2)} dB`);
+check("untouched-picture-psnr", worstPsnr >= 40, `${metrics.length} pencere, en düşük Y-PSNR ${worstPsnr.toFixed(2)} dB${PRIVACY ? " (referans da gizlilik maskesinden geçti)" : ""}`);
 check("no-level-or-colour-shift", worstShift < 0.5, `ortalama Y/U/V kayması en çok ${worstShift.toFixed(3)} kod (10 bit)`);
 // YMAX/YMIN are single-pixel extremes (noisy under lossy coding) and are reported only; the pass
 // criterion uses the 10th/90th percentiles plus "no new clipping at the legal-range limits".
@@ -159,7 +198,7 @@ if (process.argv.includes("--stills")) {
         `${dir}/${String(++n).padStart(3, "0")}_${e.id}_${label}.jpg`]);
     }
   }
-  execFileSync("ffmpeg", ["-v", "error", "-y", "-framerate", "1", "-pattern_type", "glob", "-i", `${dir}/*.jpg`, "-vf", "tile=3x3:padding=4:color=black", "-q:v", "4", `${dir}/sheet_%02d.jpg`]);
+  tileSheet(dir, /\.jpg$/, "tile=3x3:padding=4:color=black", 4);
   console.log(`Kareler: ${dir} (${readdirSync(dir).filter((f) => f.startsWith("sheet_")).length} kontak sayfası; satır = olay, sütun = giriş/tutuş/çıkış)`);
 }
 

@@ -40,9 +40,9 @@ export const viewingTransform = ({ width, height } = {}) =>
  */
 export const gfxToHlg = (startFrame, fps = "60") =>
   !sourceIsHlg()
-    ? [`settb=1/${fps}`, `setpts=N+${startFrame}`, `scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=tv:${SWS}`, "format=yuva420p10le", BT709].join(",") // SDR base: graphics stay BT.709
+    ? [`settb=1/(${fps})`, `setpts=N+${startFrame}`, `scale=in_color_matrix=bt709:in_range=tv:out_color_matrix=bt709:out_range=tv:${SWS}`, "format=yuva420p10le", BT709].join(",") // SDR base: graphics stay BT.709
     : [
-    `settb=1/${fps}`,
+    `settb=1/(${fps})`,
     `setpts=N+${startFrame}`,
     `scale=in_color_matrix=bt709:in_range=tv:out_range=pc:${SWS}`,
     "format=gbrap16le",

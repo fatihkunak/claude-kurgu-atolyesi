@@ -7,6 +7,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { p, PROXY } from "./lib/paths.mjs";
+import { tileSheet } from "./lib/platform.mjs";
 import { loadPlan } from "./lib/plan.mjs";
 import { viewingTransform } from "./lib/filters.mjs";
 
@@ -15,7 +16,7 @@ const i = process.argv.indexOf("--file");
 const file = p(i > 0 ? process.argv[i + 1] : "work/composite/draft-hlg.mov");
 const cutsFile = p("work/qc/reports/scene-cuts.txt");
 if (!existsSync(cutsFile)) {
-  spawnSync("ffmpeg", ["-hide_banner", "-v", "error", "-i", PROXY, "-an", "-vf", `scale=320:180,select='gt(scene,0.10)',metadata=print:file=${cutsFile}`, "-f", "null", "-"], { stdio: "inherit" });
+  spawnSync("ffmpeg", ["-hide_banner", "-v", "error", "-i", PROXY, "-an", "-vf", `scale=320:180,select='gt(scene,0.10)',metadata=print:file=work/qc/reports/scene-cuts.txt`, "-f", "null", "-"], { stdio: "inherit", cwd: p() });
 }
 // parse "pts_time:… / lavfi.scene_score=…" pairs; keep confident cuts, de-duplicate bursts
 const cuts = [];
@@ -56,6 +57,6 @@ process.on("exit", () => { try { rmSync(serveUrl, { recursive: true, force: true
   execFileSync("ffmpeg", ["-v", "error", "-y", "-ss", s.t.toFixed(2), "-i", file, "-frames:v", "1", "-update", "1", "-vf", viewingTransform({ width: 640, height: 360 }), "-q:v", "4",
     `${dir}/${String(n + 1).padStart(3, "0")}_${s.id}.jpg`]);
 });
-execFileSync("ffmpeg", ["-v", "error", "-y", "-framerate", "1", "-pattern_type", "glob", "-i", `${dir}/[0-9]*_E*.jpg`, "-vf", "tile=5x4:padding=4:color=black", "-q:v", "4", `${dir}/sheet_%02d.jpg`]);
+tileSheet(dir, /^[0-9].*_E.*\.jpg$/, "tile=5x4:padding=4:color=black", 4);
 console.log(`${cuts.length} kesme, ${samples.length} örnek:`);
 console.log(samples.map((s, n) => `${n + 1}:${s.id}@${s.t.toFixed(1)}`).join("  "));

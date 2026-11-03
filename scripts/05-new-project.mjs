@@ -8,7 +8,7 @@
 //                        NEW video — leave them. Auto-detected when main.mov no longer matches the old probe.
 //   --force            : archive even if the old project's work/progress.md is not marked TAMAMLANDI.
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { p } from "./lib/paths.mjs";
 
@@ -20,8 +20,30 @@ const dry = flag("dry-run");
 const slug = val("slug");
 if (!slug || !/^[a-z0-9][a-z0-9-]*$/.test(slug)) throw new Error("--slug <küçük-harf-ve-tire> gerekli (örn. --slug aso-araci-tanitim)");
 const say = (s) => console.log(`${dry ? "[deneme] " : ""}${s}`);
-const move = (from, to) => { say(`taşı  ${path.relative(p(), from)}  →  ${path.relative(p(), to)}`); if (!dry) { mkdirSync(path.dirname(to), { recursive: true }); renameSync(from, to); } };
-const clone = (from, to) => { say(`kopyala  ${from}  →  ${path.relative(p(), to)}`); if (!dry) { mkdirSync(path.dirname(to), { recursive: true }); try { execFileSync("cp", ["-c", from, to]); } catch { cpSync(from, to); } } };
+// Windows refuses to rename a file another process still has open, usually for a moment only
+const renameRetry = (from, to) => {
+  for (let tries = 20; ; tries--) {
+    try { renameSync(from, to); return; } catch (e) {
+      if (!tries || !["EPERM", "EBUSY", "EACCES"].includes(e.code)) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+    }
+  }
+};
+const moved = [];
+let archiveDest = null;
+const move = (from, to) => { say(`taşı  ${path.relative(p(), from)}  →  ${path.relative(p(), to)}`); if (!dry) { mkdirSync(path.dirname(to), { recursive: true }); renameRetry(from, to); moved.push([from, to]); } };
+// a half-archived project is worse than a refused one: anything that fails puts every moved file back
+const undoAndExit = (e) => {
+  if (moved.length) console.error(`Geri alınıyor: ${moved.length} taşıma.`);
+  for (const [from, to] of moved.reverse()) { try { mkdirSync(path.dirname(from), { recursive: true }); renameRetry(to, from); } catch (u) { console.error(`GERİ ALINAMADI: ${to} → ${from} (${u.code})`); } }
+  // rmdir only removes empty folders, so nothing that could not be moved back is lost; a leftover archive folder would refuse the next try
+  const prune = (d) => { if (!existsSync(d)) return; for (const c of readdirSync(d, { withFileTypes: true })) if (c.isDirectory()) prune(path.join(d, c.name)); try { rmdirSync(d); } catch { /* not empty */ } };
+  if (archiveDest) prune(archiveDest);
+  console.error(`Error: ${e.message}`);
+  process.exit(1);
+};
+process.on("uncaughtException", undoAndExit);
+const clone = (from, to) => { say(`kopyala  ${from}  →  ${path.relative(p(), to)}`); if (!dry) { mkdirSync(path.dirname(to), { recursive: true }); if (process.platform === "darwin") { try { execFileSync("cp", ["-c", from, to]); return; } catch { /* not APFS: plain copy */ } } cpSync(from, to); } };
 
 // ── 1. archive the current project ───────────────────────────────────────────────────────────
 // A fresh clone has no work/project.json — the demo plan there is simply replaced, nothing is archived.
@@ -35,6 +57,7 @@ if (hasOld) {
   const oldSlug = val("archive-as") ?? project?.slug ?? `proje-${stamp}`;
   const dest = p("projects", oldSlug);
   if (existsSync(dest)) throw new Error(`Arşiv klasörü zaten var: projects/${oldSlug} (başka bir ad için --archive-as).`);
+  archiveDest = dest;
   if (oldSlug === slug) throw new Error("Yeni proje adı arşivlenen projeyle aynı olamaz.");
 
   // did the user already drop the NEW video over public/main.mov?
