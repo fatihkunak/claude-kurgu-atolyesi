@@ -1,12 +1,11 @@
-// Copies the brand and panel fonts from @fontsource into public/fonts and writes their @font-face data, so neither the
+// Copies the theme (src/theme/theme.ts) and panel fonts from @fontsource into public/fonts and writes their @font-face data, so neither the
 // render nor the panel needs the internet. Run again only when a font or weight changes: node scripts/vendor-fonts.mjs
 import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { p } from "./lib/paths.mjs";
 
 const SETS = [
-  { pkg: "barlow-condensed", family: "Barlow Condensed", weights: [700, 800], render: true },
-  { pkg: "barlow", family: "Barlow", weights: [500, 600, 700, 800], render: true },
-  { pkg: "ibm-plex-mono", family: "IBM Plex Mono", weights: [500, 700], render: true },
+  { pkg: "inter", family: "Inter", weights: [500, 600, 700, 800], render: true },
+  { pkg: "jetbrains-mono", family: "JetBrains Mono", weights: [500, 700], render: true },
   { pkg: "geist", family: "Geist", weights: [400, 500, 600] },
   { pkg: "geist-mono", family: "Geist Mono", weights: [400, 500] },
 ];

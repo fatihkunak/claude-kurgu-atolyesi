@@ -3,19 +3,19 @@
 // marka/MARKA.md dosyana göre yeniden yazar. Tüm bileşenler değerleri buradan okur.
 // Single source of truth for the overlay design system. All values are in 1920×1080 design
 // units; the graphics layer is rendered with scale=2 for the 3840×2160 master.
-import { loadFont as loadInter } from "@remotion/google-fonts/Inter";
-import { loadFont as loadMono } from "@remotion/google-fonts/JetBrainsMono";
+import { loadFont } from "@remotion/fonts";
+import { staticFile } from "remotion";
+import { fontFaces } from "./fonts.generated";
 
-// latin-ext carries the Turkish glyphs (ç ğ ı İ ö ş ü). Rendering blocks until fonts are ready.
-const display = loadInter("normal", { weights: ["700", "800"], subsets: ["latin", "latin-ext"] });
-const text = loadInter("normal", { weights: ["500", "600", "700", "800"], subsets: ["latin", "latin-ext"] });
-// mono layer: micro labels, terminal, code — see visual-language.md
-const mono = loadMono("normal", { weights: ["500", "700"], subsets: ["latin", "latin-ext"] });
+// Local files (public/fonts, written by scripts/vendor-fonts.mjs): a render never needs the internet. latin-ext carries the
+// Turkish glyphs (ç ğ ı İ ö ş ü). loadFont blocks rendering until each face is ready.
+for (const f of fontFaces) void loadFont({ family: f.family, url: staticFile(`fonts/${f.file}`), weight: f.weight, unicodeRange: f.unicodeRange });
 
 export const font = {
-  display: `${display.fontFamily}, ${text.fontFamily}, sans-serif`,
-  text: `${text.fontFamily}, sans-serif`,
-  mono: `${mono.fontFamily}, ui-monospace, monospace`,
+  display: "'Inter', sans-serif",
+  text: "'Inter', sans-serif",
+  // mono layer: micro labels, terminal, code — see visual-language.md
+  mono: "'JetBrains Mono', ui-monospace, monospace",
 };
 
 // sRGB authoring values. In the HLG master, #FFFFFF maps to 203 cd/m² (75 % HLG) — never peak white.

@@ -173,15 +173,14 @@ test("Dökümde her parça düzenlenir, altyazıya işlenir", async () => {
   assert.equal(json("work/transcript/corrections.tr.json").uncertain.length, 0);
 });
 
-// Bu dalda src/theme/theme.ts asıl projenin Google Fonts sürümü (marka teması taşınmadı); yerel grafik yazı tipleri ayrı bir konu.
-test("Ağ kapalıyken arayüz ve grafik yazı tipleri yüklenir", { skip: "theme.ts Google Fonts kullanıyor (yerel yazı tipi teması bu dalda yok)" }, async () => {
+test("Ağ kapalıyken arayüz ve grafik yazı tipleri yüklenir", async () => {
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   const p2 = await ctx.newPage();
   const external = [];
   await ctx.route("**/*", (route) => { const u = new URL(route.request().url()); if (u.hostname === "localhost") return route.continue(); external.push(u.href); return route.abort(); });
   await p2.goto(B); await p2.waitForSelector("canvas"); await p2.waitForTimeout(1500);
   /* global document */
-  const fonts = await p2.evaluate(() => Promise.all(["500 13px Geist", "400 12px 'Geist Mono'", "800 40px 'Barlow Condensed'", "600 20px Barlow", "700 15px 'IBM Plex Mono'"].map(async (f) => { const loaded = await document.fonts.load(f, "şğıİöçü").catch(() => []); return [f, loaded.length > 0 && document.fonts.check(f, "şğıİöçü")]; })));
+  const fonts = await p2.evaluate(() => Promise.all(["500 13px Geist", "400 12px 'Geist Mono'", "800 40px Inter", "600 20px Inter", "700 15px 'JetBrains Mono'"].map(async (f) => { const loaded = await document.fonts.load(f, "şğıİöçü").catch(() => []); return [f, loaded.length > 0 && document.fonts.check(f, "şğıİöçü")]; })));
   await ctx.close();
   assert.deepEqual(external, [], `dış istek: ${external}`);
   for (const [f, ok] of fonts) assert.ok(ok, f);

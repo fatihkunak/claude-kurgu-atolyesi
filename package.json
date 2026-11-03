@@ -19,11 +19,10 @@
     "zod": "4.5.4"
   },
   "devDependencies": {
-    "@fontsource/barlow": "5.3.0",
-    "@fontsource/barlow-condensed": "5.3.0",
     "@fontsource/geist": "5.3.0",
     "@fontsource/geist-mono": "5.3.0",
-    "@fontsource/ibm-plex-mono": "5.3.0",
+    "@fontsource/inter": "5.3.0",
+    "@fontsource/jetbrains-mono": "5.3.0",
     "@playwright/test": "1.61.1",
     "@remotion/eslint-config-flat": "4.0.526",
     "@remotion/fonts": "4.0.526",
